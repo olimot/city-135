@@ -62,44 +62,47 @@ const activeLineEnd = vec3.create();
 let activeVertexId = -1;
 let isTranslating = false;
 canvas.addEventListener("pointerdown", (e) => {
-  isTranslating = activeTool === "none";
-  if (activeTool === "road") {
-    if (
-      activeVertexId !== -1 &&
-      vec3.distance(activeLineStart, activeLineEnd) < 4
-    ) {
-      vs.length -= ids[ids.length - 2] !== ids[ids.length - 3] ? 6 : 3;
-      ids.length -= 2;
-      activeVertexId = -1;
-      return;
-    }
-    const box = e.target as HTMLElement;
-    cursor[0] = (e.offsetX / box.clientWidth) * 2 - 1;
-    cursor[1] = (-e.offsetY / box.clientHeight) * 2 + 1;
-    cursor[2] = -1;
-    mat4.multiply(tmp0, projection, view);
-    const invViewProj = mat4.invert(tmp0, tmp0);
-    vec3.transformMat4(cursor, cursor, invViewProj);
-    vec3.copy(activeLineStart, cursor);
-    vec3.copy(activeLineEnd, cursor);
-    if (activeVertexId !== -1) {
-      vec3.copy(prevTangent, tangent);
-      vs.push(...activeLineEnd);
-      ids.push(activeVertexId, ++activeVertexId);
-    } else {
-      vec3.zero(prevTangent);
-      activeVertexId = vs.length / 3;
-      vs.push(...cursor, ...cursor);
-      ids.push(activeVertexId, ++activeVertexId);
-    }
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vs), gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint8Array(ids), gl.STATIC_DRAW);
+  if (activeTool === "none") {
+    isTranslating = true;
+    e.preventDefault();
+  } else if (activeTool === "road") {
+    e.preventDefault();
   }
 });
-canvas.addEventListener("pointerup", () => {
+canvas.addEventListener("pointerup", (e) => {
   isTranslating = false;
+  if (
+    activeVertexId !== -1 &&
+    vec3.distance(activeLineStart, activeLineEnd) < 4
+  ) {
+    vs.length -= ids[ids.length - 2] !== ids[ids.length - 3] ? 6 : 3;
+    ids.length -= 2;
+    activeVertexId = -1;
+    return;
+  }
+  const box = e.target as HTMLElement;
+  cursor[0] = (e.offsetX / box.clientWidth) * 2 - 1;
+  cursor[1] = (-e.offsetY / box.clientHeight) * 2 + 1;
+  cursor[2] = -1;
+  mat4.multiply(tmp0, projection, view);
+  const invViewProj = mat4.invert(tmp0, tmp0);
+  vec3.transformMat4(cursor, cursor, invViewProj);
+  vec3.copy(activeLineStart, cursor);
+  vec3.copy(activeLineEnd, cursor);
+  if (activeVertexId !== -1) {
+    vec3.copy(prevTangent, tangent);
+    vs.push(...activeLineEnd);
+    ids.push(activeVertexId, ++activeVertexId);
+  } else {
+    vec3.zero(prevTangent);
+    activeVertexId = vs.length / 3;
+    vs.push(...cursor, ...cursor);
+    ids.push(activeVertexId, ++activeVertexId);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vs), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint8Array(ids), gl.STATIC_DRAW);
 });
 
 const tmp0 = mat4.create();
