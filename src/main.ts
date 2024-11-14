@@ -1,6 +1,7 @@
 import { mat4, vec3, vec4 } from "gl-matrix";
 import { initWebGL2 } from "./gl";
-import { createProgram } from "./shader";
+import { createProgram as createLineSegmentProgram } from "./line-segment-shader";
+import { createProgram as createCursorProgram } from "./cursor-shader";
 
 // # setup canvas
 const canvas = document.getElementById("screen") as HTMLCanvasElement;
@@ -18,15 +19,14 @@ new ResizeObserver(([entry]) => {
 const gl = initWebGL2(canvas);
 
 // # create a shader program
-const draw = createProgram(gl);
-
+const drawSegment = createLineSegmentProgram(gl);
+const drawCursor = createCursorProgram(gl);
 const identity = mat4.identity(mat4.create());
 const camera = mat4.clone(identity);
 const view = mat4.clone(identity);
 const projection = mat4.clone(identity);
 
 const model = mat4.clone(identity);
-mat4.translate(model, model, [0, 0, 0]);
 const color = vec4.fromValues(0, 0, 0, 1);
 
 const vs: number[] = [];
@@ -36,13 +36,11 @@ const vao = gl.createVertexArray();
 gl.bindVertexArray(vao);
 
 const vertexBuffer = gl.createBuffer();
+const elementBuffer = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vs), gl.STATIC_DRAW);
-
 gl.enableVertexAttribArray(0);
 gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-
-const elementBuffer = gl.createBuffer();
 gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
 gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint8Array(ids), gl.STATIC_DRAW);
 gl.bindVertexArray(null);
@@ -67,47 +65,74 @@ canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
   } else if (activeTool === "road") {
     e.preventDefault();
+    if (
+      activeVertexId !== -1 &&
+      vec3.distance(activeLineStart, activeLineEnd) < 4
+    ) {
+      ids.length -= 2;
+      activeVertexId = -1;
+      return;
+    }
+
+    if (e.button == 2 && activeVertexId !== -1) {
+      const isFirstLine =
+        ids.length <= 2 || ids[ids.length - 2] !== ids[ids.length - 3];
+      ids.length -= 2;
+      activeVertexId = isFirstLine ? -1 : (ids.at(-1) ?? -1);
+      if (activeVertexId !== -1) {
+        const aId = ids.at(-2)!;
+        vec3.copy(activeLineStart, [
+          vs[aId * 3 + 0],
+          vs[aId * 3 + 1],
+          vs[aId * 3 + 2],
+        ]);
+        vec3.copy(activeLineEnd, cursor);
+        vs[activeVertexId * 3 + 0] = cursor[0];
+        vs[activeVertexId * 3 + 1] = cursor[1];
+        vs[activeVertexId * 3 + 2] = cursor[2];
+      }
+    } else {
+      vec3.copy(activeLineStart, cursor);
+      vec3.copy(activeLineEnd, cursor);
+      if (activeVertexId !== -1) {
+        vec3.copy(prevTangent, tangent);
+        ids.push(activeVertexId);
+        activeVertexId += 1;
+        vs[activeVertexId * 3 + 0] = cursor[0];
+        vs[activeVertexId * 3 + 1] = cursor[1];
+        vs[activeVertexId * 3 + 2] = cursor[2];
+        ids.push(activeVertexId);
+      } else {
+        vec3.zero(prevTangent);
+        activeVertexId = vs.length / 3;
+        vs[activeVertexId * 3 + 0] = cursor[0];
+        vs[activeVertexId * 3 + 1] = cursor[1];
+        vs[activeVertexId * 3 + 2] = cursor[2];
+        ids.push(activeVertexId);
+        activeVertexId += 1;
+        vs[activeVertexId * 3 + 0] = cursor[0];
+        vs[activeVertexId * 3 + 1] = cursor[1];
+        vs[activeVertexId * 3 + 2] = cursor[2];
+        ids.push(activeVertexId);
+      }
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vs), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint8Array(ids), gl.STATIC_DRAW);
   }
 });
-canvas.addEventListener("pointerup", (e) => {
+canvas.addEventListener("pointerup", () => {
   isTranslating = false;
-  if (
-    activeVertexId !== -1 &&
-    vec3.distance(activeLineStart, activeLineEnd) < 4
-  ) {
-    vs.length -= ids[ids.length - 2] !== ids[ids.length - 3] ? 6 : 3;
-    ids.length -= 2;
-    activeVertexId = -1;
-    return;
-  }
-  const box = e.target as HTMLElement;
-  cursor[0] = (e.offsetX / box.clientWidth) * 2 - 1;
-  cursor[1] = (-e.offsetY / box.clientHeight) * 2 + 1;
-  cursor[2] = -1;
-  mat4.multiply(tmp0, projection, view);
-  const invViewProj = mat4.invert(tmp0, tmp0);
-  vec3.transformMat4(cursor, cursor, invViewProj);
-  vec3.copy(activeLineStart, cursor);
-  vec3.copy(activeLineEnd, cursor);
-  if (activeVertexId !== -1) {
-    vec3.copy(prevTangent, tangent);
-    vs.push(...activeLineEnd);
-    ids.push(activeVertexId, ++activeVertexId);
-  } else {
-    vec3.zero(prevTangent);
-    activeVertexId = vs.length / 3;
-    vs.push(...cursor, ...cursor);
-    ids.push(activeVertexId, ++activeVertexId);
-  }
-  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vs), gl.STATIC_DRAW);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint8Array(ids), gl.STATIC_DRAW);
 });
+
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 const tmp0 = mat4.create();
 const movement = vec3.create();
 const cursor = vec3.create();
+const cursorModel = mat4.clone(identity);
 canvas.addEventListener("pointermove", (e) => {
   const canvas = e.target as HTMLCanvasElement;
   cursor[0] = (e.offsetX / canvas.clientWidth) * 2 - 1;
@@ -116,6 +141,55 @@ canvas.addEventListener("pointermove", (e) => {
   mat4.multiply(tmp0, projection, view);
   const invViewProj = mat4.invert(tmp0, tmp0);
   vec3.transformMat4(cursor, cursor, invViewProj);
+
+  const aliveVertIds = new Set(ids);
+  const snapPoint = { d: +Infinity, x: [0, 0, 0] as vec3 };
+  for (const vertId of aliveVertIds) {
+    if (vertId === activeVertexId) continue;
+    const x: vec3 = [
+      vs[vertId * 3 + 0],
+      vs[vertId * 3 + 1],
+      vs[vertId * 3 + 2],
+    ];
+    const distance = vec3.distance(cursor, x);
+    if (distance < snapPoint.d) {
+      snapPoint.d = distance;
+      snapPoint.x = x;
+    }
+  }
+  if (snapPoint.d > 4) {
+    const lineCount = ids.length / 2;
+    for (let i = 0; i < lineCount; i++) {
+      if (ids[i * 2 + 1] === activeVertexId) continue;
+      const a: vec3 = [
+        vs[ids[i * 2] * 3 + 0],
+        vs[ids[i * 2] * 3 + 1],
+        vs[ids[i * 2] * 3 + 2],
+      ];
+      const b: vec3 = [
+        vs[ids[i * 2 + 1] * 3 + 0],
+        vs[ids[i * 2 + 1] * 3 + 1],
+        vs[ids[i * 2 + 1] * 3 + 2],
+      ];
+      const len = vec3.distance(b, a);
+      const d: vec3 = [0, 0, 0];
+      vec3.normalize(d, vec3.subtract(d, b, a));
+
+      const x: vec3 = [0, 0, 0];
+      vec3.subtract(x, cursor, a);
+      const dot = vec3.dot(x, d);
+      if (dot < 0 || dot > len) continue;
+      vec3.add(x, a, vec3.scale(d, d, dot));
+      const distance = vec3.distance(cursor, x);
+      if (distance < snapPoint.d) {
+        snapPoint.d = distance;
+        snapPoint.x = x;
+      }
+    }
+  }
+  if (snapPoint.d < 4) vec3.copy(cursor, snapPoint.x);
+  mat4.fromTranslation(cursorModel, cursor);
+
   if (isTranslating) {
     movement[0] = ((e.offsetX - e.movementX) / canvas.clientWidth) * 2 - 1;
     movement[1] = (-(e.offsetY - e.movementY) / canvas.clientHeight) * 2 + 1;
@@ -133,7 +207,6 @@ canvas.addEventListener("pointermove", (e) => {
     vs[lineEndOffset + 2] = activeLineEnd[2];
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vs), gl.STATIC_DRAW);
-
     vec3.subtract(tangent, activeLineEnd, activeLineStart);
     vec3.normalize(tangent, tangent);
   }
@@ -153,7 +226,8 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
   // ## draw an object
-  draw(view, projection, model, color, vao, ids.length);
+  drawSegment(view, projection, model, color, vao, ids.length);
+  drawCursor(view, projection, cursorModel, [1, 0, 0, 1]);
 
   requestAnimationFrame(frame.bind(null, time));
 });
