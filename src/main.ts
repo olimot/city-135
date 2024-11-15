@@ -80,9 +80,7 @@ canvas.addEventListener("pointermove", (e) => {
 
   // Find snap point among start and end points of lines
   for (const vert of verts) {
-    if (activeLine && (vert === activeLine.a || vert === activeLine.b)) {
-      continue;
-    }
+    if (vert === activeLine?.b) continue;
     const distance = vec3.distance(screenPoint, vert);
     if (distance > snapPoint.d) continue;
     snapPoint.d = distance;
