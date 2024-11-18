@@ -1,8 +1,9 @@
 import { mat4, vec3, vec4 } from "gl-matrix";
+import { setPointerPoint } from "./canvas";
 import { createProgram as createCursorProgram } from "./cursor-shader";
 import { initWebGL2 } from "./gl";
 import { createProgram as createLineSegmentProgram } from "./line-segment-shader";
-import { Line } from "./primitive";
+import { RoadLayout, RoadPath } from "./road-layout";
 
 // # setup canvas
 const canvas = document.getElementById("screen") as HTMLCanvasElement;
@@ -20,8 +21,9 @@ new ResizeObserver(([entry]) => {
 const gl = initWebGL2(canvas);
 
 // # create a shader program
-const drawSegment = createLineSegmentProgram(gl);
-const drawCursor = createCursorProgram(gl);
+const drawPath = createLineSegmentProgram(gl);
+const drawNode = createCursorProgram(gl);
+
 const identity = mat4.identity(mat4.create());
 const camera = mat4.clone(identity);
 const view = mat4.clone(identity);
@@ -33,15 +35,26 @@ const color = vec4.fromValues(0, 0, 0, 1);
 const vao = gl.createVertexArray();
 gl.bindVertexArray(vao);
 
-let vertexCount = 0;
+let elementCount = 0;
 const vertexBuffer = gl.createBuffer();
+const elementBuffer = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-gl.bufferData(gl.ARRAY_BUFFER, null, gl.STATIC_DRAW);
 gl.enableVertexAttribArray(0);
 gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
 gl.bindVertexArray(null);
+const updateVertexArray = (vertices: Float32Array, elements: Uint32Array) => {
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+  elementCount = elements.length;
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, elements, gl.STATIC_DRAW);
+};
 
-let activeTool: string = "none";
+const q = '[name="active-tool"][checked]';
+let activeTool =
+  (document.querySelector(q) as HTMLInputElement | null)?.value ?? "none";
+
 document.addEventListener("change", (event) => {
   const e = event.target;
   if (e instanceof HTMLInputElement && e.name === "active-tool") {
@@ -49,142 +62,156 @@ document.addEventListener("change", (event) => {
   }
 });
 
-const lines = new Set<Line>();
-const linesToAdd: Line[] = [];
-const updateVertexArray = () => {
-  const verts = [...lines, ...linesToAdd].flatMap((l) => [...l.a, ...l.b]);
-  vertexCount = verts.length / 3;
-  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+// should I make a class for nodes & path set?
+
+// - 지금 움직이고 있는 생성 중인 도로(activePath) 따로 그리고 하이라이트
+// - 생성 중인 도로 따로 그리고(gl draw) 하이라이트(다른 색 쓰기)
+// - 선 위에 선 제거
+// - 노드 움직일 수 있게 하자.
+
+const layout = new RoadLayout();
+let workingPath: RoadPath | null = null;
+const workingIsects = new Set<vec3>();
+
+const updateRoadLayout = () => {
+  const nodes = layout.nodes.slice();
+  const lines = Array.from(layout.paths);
+  if (workingPath) nodes.push(workingPath.a, workingPath.b);
+  if (workingPath) lines.push(workingPath);
+
+  const vertices = new Float32Array(nodes.flatMap((a) => [...a]));
+  const elements = new Uint32Array(
+    lines.flatMap((l) => [nodes.indexOf(l.a), nodes.indexOf(l.b)]),
+  );
+  updateVertexArray(vertices, elements);
 };
 
+let isMiddleDown = false;
 const screenPoint = vec3.create();
 let cursor = screenPoint;
-const intersections = new Set<mat4>();
-const tmp0 = mat4.create();
 const movement = vec3.create();
 const cursorModel = mat4.clone(identity);
 canvas.addEventListener("pointermove", (e) => {
-  const canvas = e.target as HTMLCanvasElement;
-  screenPoint[0] = (e.offsetX / canvas.clientWidth) * 2 - 1;
-  screenPoint[1] = (-e.offsetY / canvas.clientHeight) * 2 + 1;
-  screenPoint[2] = -1;
-  const invViewProj = mat4.invert(tmp0, mat4.multiply(tmp0, projection, view));
-  vec3.transformMat4(screenPoint, screenPoint, invViewProj);
+  setPointerPoint(screenPoint, movement, projection, view, e);
 
   // Snap to existing lines and points
-  const allOtherLines = [...lines, ...linesToAdd.slice(0, -1)];
-  const activeLine = linesToAdd.at(-1);
-  const verts = allOtherLines.flatMap((l) => [l.a, l.b]);
+  const verts = layout.nodes.slice();
+  verts.push(...workingIsects);
   const snapPoint = { d: +Infinity, x: [0, 0, 0] as vec3 };
-
-  // Find snap point among start and end points of lines
   for (const vert of verts) {
-    if (vert === activeLine?.b) continue;
+    // Find a closest joint of lines
     const distance = vec3.distance(screenPoint, vert);
     if (distance > snapPoint.d) continue;
     snapPoint.d = distance;
     snapPoint.x = vert;
   }
-
-  // Find snap point on lines
-  if (snapPoint.d > 4) {
-    for (const line of allOtherLines) {
-      if (line === activeLine) continue;
-      const len = line.getLength();
-      const d = line.getTangent();
-      const x: vec3 = vec3.subtract(vec3.create(), screenPoint, line.a);
+  if (snapPoint.d > 16) {
+    // Find a closest point on lines if no joint near cursor.
+    for (const path of layout.paths) {
+      const len = path.getLength();
+      const d = path.getTangent();
+      const x: vec3 = vec3.subtract(vec3.create(), screenPoint, path.a);
       const xDotD = vec3.dot(x, d);
       if (xDotD < 0 || xDotD > len) continue;
-      vec3.add(x, line.a, vec3.scale(d, d, xDotD));
+      vec3.add(x, path.a, vec3.scale(d, d, xDotD));
       const distance = vec3.distance(screenPoint, x);
       if (distance > snapPoint.d) continue;
       snapPoint.d = distance;
       snapPoint.x = x;
     }
   }
-  cursor = snapPoint.d < 4 ? snapPoint.x : vec3.clone(screenPoint);
+  cursor = snapPoint.d < 16 ? snapPoint.x : vec3.clone(screenPoint);
   mat4.fromTranslation(cursorModel, cursor);
 
-  if (isTranslating) {
-    movement[0] = ((e.offsetX - e.movementX) / canvas.clientWidth) * 2 - 1;
-    movement[1] = (-(e.offsetY - e.movementY) / canvas.clientHeight) * 2 + 1;
-    movement[2] = -1;
-    vec3.transformMat4(movement, movement, invViewProj);
-    vec3.subtract(movement, movement, cursor);
-
+  if (isTranslating || isMiddleDown) {
     mat4.translate(camera, camera, movement);
     mat4.invert(view, camera);
-  } else if (activeLine) {
-    activeLine.b = cursor;
-    intersections.clear();
-    for (const line of allOtherLines) {
-      const p = line.getIntersectionPoint(activeLine);
-      if (p) intersections.add(mat4.fromTranslation(mat4.create(), p));
+  } else if (workingPath) {
+    workingPath.b = cursor;
+    workingIsects.clear();
+    for (const line of layout.paths) {
+      const p = line.getIntersectionPoint(workingPath);
+      if (p && p !== workingPath.a && p !== workingPath.b) {
+        workingIsects.add(p);
+      }
     }
-    updateVertexArray();
+    updateRoadLayout();
   }
 });
 
 let isTranslating = false;
 canvas.addEventListener("pointerdown", (e) => {
-  if (activeTool === "none") {
+  isMiddleDown = e.pointerType === "mouse" && e.button === 1;
+
+  if (activeTool === "none" || isMiddleDown) {
     isTranslating = true;
     e.preventDefault();
   } else if (activeTool === "road") {
     e.preventDefault();
-    const activeLine = linesToAdd.at(-1);
-    if (activeLine && activeLine.getLength() < 4) {
-      const queue = [...linesToAdd];
-      intersectionFinderQueue: while (queue.length) {
-        const line = queue.shift()!;
-        for (const other of lines) {
-          const p = other.getIntersectionPoint(line);
-          const isFromLineJoint = line.a === p || line.b === p;
+
+    if (workingPath && e.pointerType === "mouse" && e.button === 2) {
+      workingPath = null;
+      workingIsects.clear();
+    } else if (workingPath) {
+      // find intersections and split lines.
+      const queue: RoadPath[] = [workingPath];
+      queueLoop: while (queue.length) {
+        const path = queue.shift()!;
+        linesLoop: for (const other of layout.paths) {
+          let p = other.getIntersectionPoint(path);
+          if (p) {
+            for (const i of workingIsects) {
+              if (vec3.equals(p, i)) {
+                p = i;
+                break;
+              }
+            }
+          }
+          const isFromLineJoint = path.a === p || path.b === p;
           const isFromOtherJoint = other.a === p || other.b === p;
-          if (!p || (isFromLineJoint && isFromOtherJoint)) continue;
+          if (!p || (isFromLineJoint && isFromOtherJoint)) continue linesLoop;
           if (!isFromOtherJoint) {
-            console.log("p will be added in other");
-            lines.add(new Line(other.a, p));
-            lines.add(new Line(p, other.b));
-            lines.delete(other);
+            if (layout.nodes.indexOf(p) === -1) layout.nodes.push(p);
+            layout.paths.push(new RoadPath(other.a, p));
+            layout.paths.push(new RoadPath(p, other.b));
+            layout.paths.splice(layout.paths.indexOf(other), 1);
           }
           if (isFromLineJoint) {
-            queue.push(line);
+            queue.push(path);
           } else {
-            console.log("p will be added in this line");
-            queue.push(new Line(line.a, p));
-            queue.push(new Line(p, line.b));
+            queue.push(new RoadPath(path.a, p));
+            queue.push(new RoadPath(p, path.b));
           }
-          continue intersectionFinderQueue;
+          continue queueLoop;
         }
-        lines.add(line);
+        if (layout.nodes.indexOf(path.a) === -1) layout.nodes.push(path.a);
+        if (layout.nodes.indexOf(path.b) === -1) layout.nodes.push(path.b);
+        layout.paths.push(path);
       }
-      intersections.clear();
-      linesToAdd.splice(0);
-      const joints = new Set([...lines].flatMap((x) => [x.a, x.b]));
-      console.log("Total count of joints:", joints.size);
-    } else if (e.button == 2 && activeLine) {
-      linesToAdd.pop();
+      workingIsects.clear();
+      workingPath = null;
+      console.log("Number of nodes:", layout.nodes.length);
     } else {
-      linesToAdd.push(new Line(cursor, cursor));
+      workingIsects.clear();
+      workingPath = new RoadPath(cursor, cursor);
     }
-    updateVertexArray();
+    updateRoadLayout();
   }
 });
 
-canvas.addEventListener("pointerup", () => {
+canvas.addEventListener("pointerup", (e) => {
+  if (e.pointerType === "mouse" && e.button === 1) isMiddleDown = false;
   isTranslating = false;
 });
 
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // # for each frame
+const tmpModel = mat4.create();
 requestAnimationFrame(function frame(prev: number, time = prev) {
   const delta = time - prev;
-  if (delta > 30) {
-    console.warn(`requestAnimationFrame() called after ${delta}ms.`);
-  }
+  if (delta > 30) console.info(`raf delta: ${delta}ms.`);
+
   // ## update camera materices
   mat4.ortho(projection, 0, canvas.clientWidth, canvas.clientHeight, 0, 0, 1);
 
@@ -193,20 +220,21 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
   // ## draw an object
-  drawSegment(view, projection, model, color, vao, vertexCount);
-  drawCursor(view, projection, cursorModel, [1, 0, 0, 1]);
+  drawPath(view, projection, model, color, vao, elementCount);
 
-  for (const p of intersections) {
-    drawCursor(view, projection, p, [0, 1, 0, 1]);
+  for (const p of workingIsects) {
+    const model = mat4.fromTranslation(tmpModel, p);
+    drawNode(view, projection, model, [0, 1, 0, 1], false);
   }
 
-  const tmpModel = mat4.create();
-  for (const l of [...lines, ...linesToAdd]) {
-    mat4.fromTranslation(tmpModel, l.a);
-    drawCursor(view, projection, tmpModel, [0, 1, 1, 0.25]);
-    mat4.fromTranslation(tmpModel, l.b);
-    drawCursor(view, projection, tmpModel, [1, 0, 1, 0.25]);
+  const nodes = layout.nodes.slice();
+  if (workingPath) nodes.push(workingPath.a);
+  for (const node of nodes) {
+    const model = mat4.fromTranslation(tmpModel, node);
+    drawNode(view, projection, model, [0, 0, 0, 0.25], false);
   }
+
+  drawNode(view, projection, cursorModel, [1, 0, 0, 1], false);
 
   requestAnimationFrame(frame.bind(null, time));
 });

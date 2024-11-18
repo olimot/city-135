@@ -27,7 +27,7 @@ export function createProgram(gl: WebGL2RenderingContext) {
   in vec3 vPosition;
   out vec4 finalColor;
   void main() {
-    if (length(vPosition) > 4.0) discard;
+    if (length(vPosition) > 8.0) discard;
     finalColor = color;
   }
 `,
@@ -51,7 +51,7 @@ export function createProgram(gl: WebGL2RenderingContext) {
     color: gl.getUniformLocation(program, "color")!,
   };
 
-  const vs = [-4, -4, 0, -4, 4, 0, 4, 4, 0, 4, -4, 0];
+  const vs = [-8, -8, 0, -8, 8, 0, 8, 8, 0, 8, -8, 0];
   const ids = [0, 1, 2, 2, 3, 0];
 
   const vao = gl.createVertexArray();
@@ -69,6 +69,7 @@ export function createProgram(gl: WebGL2RenderingContext) {
     projection: ReadonlyMat4,
     model: ReadonlyMat4,
     color: ReadonlyVec4,
+    depthTest = true,
   ) => {
     // ## draw
     gl.useProgram(program);
@@ -82,7 +83,7 @@ export function createProgram(gl: WebGL2RenderingContext) {
     // ### set global state
     gl.frontFace(gl.CCW);
     gl.enable(gl.CULL_FACE);
-    gl.enable(gl.DEPTH_TEST);
+    gl[depthTest ? "enable" : "disable"](gl.DEPTH_TEST);
     gl.enable(gl.BLEND);
 
     // ### bind vertex array and draw
