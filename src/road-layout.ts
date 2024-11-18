@@ -8,6 +8,7 @@ export class RoadPath {
   constructor(
     public a: vec3,
     public b: vec3,
+    public width: number,
   ) {}
 
   getLength() {
@@ -45,7 +46,13 @@ export class RoadPath {
   }
 }
 
+export interface Polygon {
+  points: vec3[];
+}
+
 export class RoadLayout {
   nodes: vec3[] = [];
   paths: RoadPath[] = [];
+  nodePolygons = new Map<vec3, Polygon>();
+  pathPolygons = new Map<RoadPath, Polygon>();
 }

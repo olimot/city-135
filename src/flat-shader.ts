@@ -55,7 +55,8 @@ export function createProgram(gl: WebGL2RenderingContext) {
     model: ReadonlyMat4,
     color: ReadonlyVec4,
     vertexArray: WebGLVertexArrayObject | null,
-    elementCount: number,
+    mode: number,
+    count: number,
   ) => {
     // ## draw
     gl.useProgram(program);
@@ -74,7 +75,7 @@ export function createProgram(gl: WebGL2RenderingContext) {
 
     // ### bind vertex array and draw
     gl.bindVertexArray(vertexArray);
-    gl.drawElements(gl.LINES, elementCount, gl.UNSIGNED_INT, 0);
+    gl.drawElements(mode, count, gl.UNSIGNED_INT, 0);
     gl.bindVertexArray(null);
   };
 }
