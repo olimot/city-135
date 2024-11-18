@@ -71,7 +71,7 @@ export function createProgram(gl: WebGL2RenderingContext) {
     gl.frontFace(gl.CCW);
     gl.enable(gl.CULL_FACE);
     gl.enable(gl.DEPTH_TEST);
-    gl.disable(gl.BLEND);
+    gl.enable(gl.BLEND);
 
     // ### bind vertex array and draw
     gl.bindVertexArray(vertexArray);

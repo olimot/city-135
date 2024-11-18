@@ -1,8 +1,8 @@
-import { mat4, vec3, vec4 } from "gl-matrix";
+import { mat4, ReadonlyVec4, vec3 } from "gl-matrix";
 import { setPointerPoint } from "./canvas";
 import { createProgram as createCursorProgram } from "./cursor-shader";
-import { initWebGL2 } from "./gl";
 import { createProgram as createLineSegmentProgram } from "./flat-shader";
+import { initWebGL2 } from "./gl";
 import { RoadLayout, RoadPath } from "./road-layout";
 
 // # setup canvas
@@ -28,9 +28,7 @@ const identity = mat4.identity(mat4.create());
 const camera = mat4.clone(identity);
 const view = mat4.clone(identity);
 const projection = mat4.clone(identity);
-
 const model = mat4.clone(identity);
-const color = vec4.fromValues(0, 0, 0, 1);
 
 function createVertexArray(gl: WebGL2RenderingContext) {
   const vao = gl.createVertexArray();
@@ -51,8 +49,7 @@ function createVertexArray(gl: WebGL2RenderingContext) {
   return [vao, updateVAO] as const;
 }
 
-const [layoutVAO, updateLayoutVAO] = createVertexArray(gl);
-const [workingVAO, updateWorkingVAO] = createVertexArray(gl);
+const [tempVAO, updateTempVAO] = createVertexArray(gl);
 
 const q = '[name="active-tool"][checked]';
 let activeTool =
@@ -65,8 +62,7 @@ document.addEventListener("change", (event) => {
   }
 });
 
-// When it finishes the road, deduplicate a path on a path. Make a user able to
-// move nodes, remove nodes and paths.
+// deduplicate a path on a path. Make a user able to remove nodes and paths.
 
 const layout = new RoadLayout();
 let workPath: RoadPath | null = null;
@@ -76,7 +72,6 @@ let isMiddleDown = false;
 const screenPoint = vec3.create();
 let cursor = screenPoint;
 const movement = vec3.create();
-const cursorModel = mat4.clone(identity);
 canvas.addEventListener("pointermove", (e) => {
   setPointerPoint(screenPoint, movement, projection, view, e);
 
@@ -100,13 +95,13 @@ canvas.addEventListener("pointermove", (e) => {
     }
   }
   cursor = snapPoint.d < 16 ? snapPoint.x : vec3.clone(screenPoint);
-  mat4.fromTranslation(cursorModel, cursor);
 
   if (isTranslating || isMiddleDown) {
     mat4.translate(camera, camera, movement);
     mat4.invert(view, camera);
   } else if (workPath) {
     workPath.b = cursor;
+    workPath.computePolygon();
     workIsects.clear();
     for (const line of layout.paths) {
       const p = line.getIntersectionPoint(workPath);
@@ -114,8 +109,6 @@ canvas.addEventListener("pointermove", (e) => {
         workIsects.add(p);
       }
     }
-    const vs = new Float32Array([...workPath.a, ...workPath.b]);
-    updateWorkingVAO(vs, new Uint32Array([0, 1]));
   }
 });
 
@@ -134,6 +127,7 @@ canvas.addEventListener("pointerdown", (e) => {
       workIsects.clear();
     } else if (workPath) {
       // find intersections and split lines.
+      const joints = new Set<vec3>();
       const queue: RoadPath[] = [workPath];
       queueLoop: while (queue.length) {
         const path = queue.shift()!;
@@ -147,9 +141,13 @@ canvas.addEventListener("pointerdown", (e) => {
               }
             }
           }
+          if (!p) continue linesLoop;
+
+          joints.add(p);
           const isFromLineJoint = path.a === p || path.b === p;
           const isFromOtherJoint = other.a === p || other.b === p;
-          if (!p || (isFromLineJoint && isFromOtherJoint)) continue linesLoop;
+          if (isFromLineJoint && isFromOtherJoint) continue linesLoop;
+
           if (!isFromOtherJoint) {
             if (layout.nodes.indexOf(p) === -1) layout.nodes.push(p);
             layout.paths.push(new RoadPath(other.a, p, 16));
@@ -170,21 +168,29 @@ canvas.addEventListener("pointerdown", (e) => {
       }
       workIsects.clear();
       workPath = null;
-      for (const node of layout.nodes) {
-        if (layout.nodePolygons.has(node)) continue;
+
+      console.log(
+        "Number of nodes:",
+        layout.nodes.length,
+        "Number of paths:",
+        layout.paths.length,
+      );
+
+      // modify path side ends to make joints fit
+      for (const joint of joints) {
+        const connected: { path: RoadPath; vector: vec3 }[] = [];
+        for (const path of layout.paths) {
+          if (path.a !== joint && path.b !== joint) continue;
+          const vector = vec3.create();
+          if (path.a === joint) vec3.subtract(vector, path.b, path.a);
+          else vec3.subtract(vector, path.a, path.b);
+          connected.push({ path, vector });
+        }
       }
-      console.log("Number of nodes:", layout.nodes.length);
     } else {
       workIsects.clear();
       workPath = new RoadPath(cursor, cursor, 16);
     }
-
-    const { nodes, paths } = layout;
-    const vertices = new Float32Array(nodes.flatMap((a) => [...a]));
-    const elements = new Uint32Array(
-      paths.flatMap((l) => [nodes.indexOf(l.a), nodes.indexOf(l.b)]),
-    );
-    updateLayoutVAO(vertices, elements);
   }
 });
 
@@ -196,10 +202,9 @@ canvas.addEventListener("pointerup", (e) => {
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // # for each frame
-const tmpModel = mat4.create();
 requestAnimationFrame(function frame(prev: number, time = prev) {
   const delta = time - prev;
-  if (delta > 30) console.info(`raf delta: ${delta}ms.`);
+  if (delta > 34) console.info(`raf delta: ${delta}ms.`);
 
   // ## update camera materices
   mat4.ortho(projection, 0, canvas.clientWidth, canvas.clientHeight, 0, 0, 1);
@@ -208,25 +213,41 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
   gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-  const count = layout.paths.length * 2;
-  drawFlat(view, projection, model, color, layoutVAO, gl.LINES, count);
+  mat4.identity(model);
+  const gray: ReadonlyVec4 = [0, 0, 0, 0.25];
+  for (const path of layout.paths) {
+    updateTempVAO(
+      new Float32Array(path.getPolygon().flatMap((n) => [...n])),
+      new Uint32Array([0, 1, 2, 2, 3, 0].reverse()),
+    );
+    drawFlat(view, projection, model, gray, tempVAO, gl.TRIANGLES, 6);
+  }
+
   for (const node of layout.nodes) {
-    const model = mat4.fromTranslation(tmpModel, node);
-    drawNode(view, projection, model, [0, 0, 0, 0.25], false);
+    mat4.fromTranslation(model, node);
+    drawNode(view, projection, model, gray, false);
   }
-
+  const blue: ReadonlyVec4 = [0, 0.5, 1, 0.25];
   if (workPath) {
-    const model = mat4.identity(tmpModel);
-    drawFlat(view, projection, model, [0, 0.5, 1, 1], workingVAO, gl.LINES, 2);
-    mat4.fromTranslation(model, workPath.a);
-    drawNode(view, projection, model, [0, 0.5, 1, 0.25], false);
-    for (const p of workIsects) {
-      const model = mat4.fromTranslation(tmpModel, p);
-      drawNode(view, projection, model, [0, 0.5, 1, 0.25], false);
-    }
-  }
+    mat4.identity(model);
+    updateTempVAO(
+      new Float32Array(workPath.getPolygon().flatMap((n) => [...n])),
+      new Uint32Array([0, 1, 2, 2, 3, 0].reverse()),
+    );
+    drawFlat(view, projection, model, blue, tempVAO, gl.TRIANGLES, 6);
 
-  drawNode(view, projection, cursorModel, [1, 0, 0, 1], false);
+    mat4.fromTranslation(model, workPath.a);
+    drawNode(view, projection, model, blue, false);
+    mat4.fromTranslation(model, workPath.b);
+    drawNode(view, projection, model, blue, false);
+    for (const p of workIsects) {
+      mat4.fromTranslation(model, p);
+      drawNode(view, projection, model, blue, false);
+    }
+  } else {
+    mat4.fromTranslation(model, cursor);
+    drawNode(view, projection, model, blue, false);
+  }
 
   requestAnimationFrame(frame.bind(null, time));
 });

@@ -4,12 +4,20 @@ export class RoadPath {
   private readonly tangent = vec3.create();
   private readonly vector = vec3.create();
   private readonly tmp = vec3.create();
+  private readonly polygon: [
+    aLeft: vec3,
+    aRight: vec3,
+    bLeft: vec3,
+    bRight: vec3,
+  ] = [vec3.create(), vec3.create(), vec3.create(), vec3.create()];
 
   constructor(
     public a: vec3,
     public b: vec3,
     public width: number,
-  ) {}
+  ) {
+    this.computePolygon();
+  }
 
   getLength() {
     return vec3.distance(this.a, this.b);
@@ -21,6 +29,24 @@ export class RoadPath {
 
   getTangent() {
     return vec3.normalize(this.tangent, this.getVector());
+  }
+
+  computePolygon() {
+    const halfWidth = this.width / 2;
+    const tangent = this.getTangent();
+    vec3.set(this.polygon[0], -tangent[1], tangent[0], 0);
+    vec3.scaleAndAdd(this.polygon[0], this.a, this.polygon[0], halfWidth);
+    vec3.set(this.polygon[1], tangent[1], -tangent[0], 0);
+    vec3.scaleAndAdd(this.polygon[1], this.a, this.polygon[1], halfWidth);
+    vec3.set(this.polygon[2], tangent[1], -tangent[0], 0);
+    vec3.scaleAndAdd(this.polygon[2], this.b, this.polygon[2], halfWidth);
+    vec3.set(this.polygon[3], -tangent[1], tangent[0], 0);
+    vec3.scaleAndAdd(this.polygon[3], this.b, this.polygon[3], halfWidth);
+    return this.polygon;
+  }
+
+  getPolygon() {
+    return this.polygon;
   }
 
   getIntersectionPoint(other: RoadPath) {
