@@ -4,21 +4,13 @@ import { createProgram as createCursorProgram } from "./cursor-shader";
 import { createProgram as createLineSegmentProgram } from "./flat-shader";
 import { initWebGL2 } from "./gl";
 import { RoadLayout, RoadPath } from "./road-layout";
+import { initUI } from "./ui";
 
 // # setup canvas
-const canvas = document.getElementById("screen") as HTMLCanvasElement;
-
-// ## setup resize handler
-let resizeTask: number = 0;
-new ResizeObserver(([entry]) => {
-  clearTimeout(resizeTask);
-  const width = entry.devicePixelContentBoxSize[0].inlineSize;
-  const height = entry.devicePixelContentBoxSize[0].blockSize;
-  resizeTask = setTimeout(() => Object.assign(canvas, { width, height }), 150);
-}).observe(canvas, { box: "content-box" });
+const ui = initUI();
 
 // # initialize webgl2 rendering context
-const gl = initWebGL2(canvas);
+const gl = initWebGL2(ui.canvas);
 
 // # create a shader program
 const drawFlat = createLineSegmentProgram(gl);
@@ -49,20 +41,7 @@ function createVertexArray(gl: WebGL2RenderingContext) {
   return [vao, updateVAO] as const;
 }
 
-const [tempVAO, updateTempVAO] = createVertexArray(gl);
-
-const q = '[name="active-tool"][checked]';
-let activeTool =
-  (document.querySelector(q) as HTMLInputElement | null)?.value ?? "none";
-
-document.addEventListener("change", (event) => {
-  const e = event.target;
-  if (e instanceof HTMLInputElement && e.name === "active-tool") {
-    activeTool = e.value;
-  }
-});
-
-// deduplicate a path on a path. Make a user able to remove nodes and paths.
+const [vao, updateVAO] = createVertexArray(gl);
 
 const layout = new RoadLayout();
 let workPath: RoadPath | null = null;
@@ -72,7 +51,7 @@ let isMiddleDown = false;
 const screenPoint = vec3.create();
 let cursor = screenPoint;
 const movement = vec3.create();
-canvas.addEventListener("pointermove", (e) => {
+ui.canvas.addEventListener("pointermove", (e) => {
   setPointerPoint(screenPoint, movement, projection, view, e);
 
   // Snap to existing lines and points
@@ -113,13 +92,13 @@ canvas.addEventListener("pointermove", (e) => {
 });
 
 let isTranslating = false;
-canvas.addEventListener("pointerdown", (e) => {
+ui.canvas.addEventListener("pointerdown", (e) => {
   isMiddleDown = e.pointerType === "mouse" && e.button === 1;
 
-  if (activeTool === "none" || isMiddleDown) {
+  if (ui.activeTool === "none" || isMiddleDown) {
     isTranslating = true;
     e.preventDefault();
-  } else if (activeTool === "road") {
+  } else if (ui.activeTool === "road") {
     e.preventDefault();
 
     if (workPath && e.pointerType === "mouse" && e.button === 2) {
@@ -194,12 +173,10 @@ canvas.addEventListener("pointerdown", (e) => {
   }
 });
 
-canvas.addEventListener("pointerup", (e) => {
+ui.canvas.addEventListener("pointerup", (e) => {
   if (e.pointerType === "mouse" && e.button === 1) isMiddleDown = false;
   isTranslating = false;
 });
-
-canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // # for each frame
 requestAnimationFrame(function frame(prev: number, time = prev) {
@@ -207,7 +184,8 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
   if (delta > 34) console.info(`raf delta: ${delta}ms.`);
 
   // ## update camera materices
-  mat4.ortho(projection, 0, canvas.clientWidth, canvas.clientHeight, 0, 0, 1);
+  const { clientWidth, clientHeight } = ui.canvas;
+  mat4.ortho(projection, 0, clientWidth, clientHeight, 0, 0, 1);
 
   // ## clear screen
   gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
@@ -216,11 +194,11 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
   mat4.identity(model);
   const gray: ReadonlyVec4 = [0, 0, 0, 0.25];
   for (const path of layout.paths) {
-    updateTempVAO(
+    updateVAO(
       new Float32Array(path.getPolygon().flatMap((n) => [...n])),
       new Uint32Array([0, 1, 2, 2, 3, 0].reverse()),
     );
-    drawFlat(view, projection, model, gray, tempVAO, gl.TRIANGLES, 6);
+    drawFlat(view, projection, model, gray, vao, gl.TRIANGLES, 6);
   }
 
   for (const node of layout.nodes) {
@@ -230,11 +208,11 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
   const blue: ReadonlyVec4 = [0, 0.5, 1, 0.25];
   if (workPath) {
     mat4.identity(model);
-    updateTempVAO(
+    updateVAO(
       new Float32Array(workPath.getPolygon().flatMap((n) => [...n])),
       new Uint32Array([0, 1, 2, 2, 3, 0].reverse()),
     );
-    drawFlat(view, projection, model, blue, tempVAO, gl.TRIANGLES, 6);
+    drawFlat(view, projection, model, blue, vao, gl.TRIANGLES, 6);
 
     mat4.fromTranslation(model, workPath.a);
     drawNode(view, projection, model, blue, false);

@@ -1,17 +1,21 @@
 import { vec3 } from "gl-matrix";
+
 const x = vec3.create();
 const r = vec3.create();
 const s = vec3.create();
 
-export function getLineLineIntersection(lines: [[vec3, vec3], [vec3, vec3]]) {
-  const p = lines[0][0];
-  const pEnd = lines[0][1];
-  const q = lines[1][0];
-  const qEnd = lines[1][1];
+/**
+ * find line(a)-line(b) intersection point. only x and y of line points(vec3) should be used (z is 0.)
+ * @param a a line
+ * @param b another line
+ * @returns intersection point (or null if not exists)
+ */
+export function getLineLineIntersection(a: [vec3, vec3], b: [vec3, vec3]) {
+  const [p, pEnd] = a;
+  const [q, qEnd] = b;
   vec3.sub(r, pEnd, p);
   vec3.sub(s, qEnd, q);
-
-  // line points a and b are vec3 but it should use only x and y (z is 0).
+  
   const denominator = vec3.cross(x, r, s)[2];
   if (!denominator) return null;
 
@@ -27,17 +31,15 @@ export function getLineLineIntersection(lines: [[vec3, vec3], [vec3, vec3]]) {
   return vec3.clone(x);
 }
 
-/**
- *
- * @param joint a joint point of lines
- * @param lineEnds points of lines opposite to the joint point
- */
-export default function computeJoint(joint: vec3, lineEnds: vec3[]) {
-  // for each joints {
-  //   sort paths by its angle (make below loop goes along counter-clockwise)
-  //   for each path {
-  //     get an intersection point between right outline of current path and left outline of next path
-  //   }
-  // }
-  return [joint, lineEnds];
+const t = vec3.create();
+
+export function getClosestPointOnLine(line: [vec3, vec3], point: vec3): vec3 {
+  vec3.subtract(t, line[1], line[0]);
+  const length = vec3.length(t);
+  vec3.subtract(x, point, line[0]);
+  const xDotT = vec3.dot(x, vec3.normalize(t, t));
+  if (xDotT < 0) return line[0];
+  if (xDotT > length) return line[1];
+  vec3.add(x, line[0], vec3.scale(t, t, xDotT));
+  return x;
 }
