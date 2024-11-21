@@ -26,7 +26,7 @@ export function getLineLineIntersection(
 export function getLineLineIntersection(
   a: readonly [vec3, vec3],
   b: readonly [vec3, vec3],
-  strict: unknown = Symbol(),
+  strict = true,
 ): [number, vec3] | null {
   const [p, pEnd] = a;
   const [q, qEnd] = b;
@@ -63,7 +63,6 @@ ${toStringFromVec3(b[0])} - ${toStringFromVec3(b[1])}`);
   const tTol = tolerance / rlen;
   const uTol = tolerance / slen;
   if (strict && (t < -tTol || t > 1 + tTol || u < -uTol || u > 1 + uTol)) {
-    if (strict === true) console.log("over tolerance", { t, u });
     return null;
   }
   vec3.add(x, p, vec3.scale(x, r, t));

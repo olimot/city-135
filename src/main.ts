@@ -63,7 +63,6 @@ ui.canvas.addEventListener("pointermove", (e) => {
         ghost.intersections.push({ t, point, edge: otherEdge });
       }
     }
-    console.log("isects:", ...ghost.intersections);
     ghost.intersections.sort((a, b) => a.t - b.t);
   }
 
@@ -103,11 +102,7 @@ let idInc = 0;
 function updateRoadNode(a: vec3) {
   a = node(a, graph);
   const adjacencyList = graph.get(a);
-  if (!adjacencyList?.length) {
-    console.log("There is no node for a road node");
-    return;
-  }
-  console.log("updateRoadNode() for:", indexOf(a, graph));
+  if (!adjacencyList?.length) return;
 
   let roadNode = roadNodes.get(a);
   if (!roadNode) {
@@ -181,9 +176,6 @@ function updateRoadNode(a: vec3) {
       const [vao, updateVAO] = createVertexArray(gl);
       segment = { vao, updateVAO, nodes: [roadNode, otherRoadNode] };
       roadSegments.push(segment);
-      console.log("road segment added:", indexOf(a, graph), indexOf(b, graph));
-    } else {
-      console.log("road segment found:", indexOf(a, graph), indexOf(b, graph));
     }
 
     const verts = [
@@ -227,7 +219,6 @@ ui.canvas.addEventListener("pointerdown", (e) => {
     if (ghost.anchor) {
       if (!isRightDown) {
         let a = ghost.anchor;
-        console.log("isects:", ...ghost.intersections);
         for (const isect of ghost.intersections) {
           addEdge(a, isect.point, graph);
           removeEdge(isect.edge[0], isect.edge[1], graph);
