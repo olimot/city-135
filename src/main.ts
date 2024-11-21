@@ -1,10 +1,23 @@
 import { mat4, ReadonlyVec4, vec3 } from "gl-matrix";
 import { setPointerPoint } from "./canvas";
-import { createProgram as createCursorProgram } from "./cursor-shader";
-import { createProgram as createLineSegmentProgram } from "./flat-shader";
-import { initWebGL2 } from "./gl";
-import { RoadLayout, RoadPath } from "./road-layout";
+import {
+  createFlatShader,
+  createPointShader,
+  createVertexArray,
+  initWebGL2,
+} from "./gl";
+import {
+  addEdge,
+  createGraph,
+  findSnapPoint,
+  getEdges,
+  indexOf,
+  node,
+  printGraph,
+  removeEdge,
+} from "./graph";
 import { initUI } from "./ui";
+import { getLineLineIntersection } from "./primitive";
 
 // # setup canvas
 const ui = initUI();
@@ -13,8 +26,8 @@ const ui = initUI();
 const gl = initWebGL2(ui.canvas);
 
 // # create a shader program
-const drawFlat = createLineSegmentProgram(gl);
-const drawNode = createCursorProgram(gl);
+const drawFlat = createFlatShader(gl);
+const drawNode = createPointShader(gl);
 
 const identity = mat4.identity(mat4.create());
 const camera = mat4.clone(identity);
@@ -22,153 +35,221 @@ const view = mat4.clone(identity);
 const projection = mat4.clone(identity);
 const model = mat4.clone(identity);
 
-function createVertexArray(gl: WebGL2RenderingContext) {
-  const vao = gl.createVertexArray();
-  const vertexBuffer = gl.createBuffer();
-  const elementBuffer = gl.createBuffer();
-  gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
-  gl.bindVertexArray(null);
-  const updateVAO = (vertices: Float32Array, elements: Uint32Array) => {
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, elements, gl.STATIC_DRAW);
-  };
-  return [vao, updateVAO] as const;
-}
-
 const [vao, updateVAO] = createVertexArray(gl);
 
-const layout = new RoadLayout();
-let workPath: RoadPath | null = null;
-const workIsects = new Set<vec3>();
+const graph = createGraph();
+const ghost = {
+  anchor: null as vec3 | null,
+  focus: vec3.create(),
+  focusEdge: null as [vec3, vec3] | null,
+  intersections: [] as { t: number; point: vec3; edge: [vec3, vec3] }[],
+};
 
 let isMiddleDown = false;
 const screenPoint = vec3.create();
-let cursor = screenPoint;
 const movement = vec3.create();
 ui.canvas.addEventListener("pointermove", (e) => {
   setPointerPoint(screenPoint, movement, projection, view, e);
 
-  // Snap to existing lines and points
-  const snapPoint = { d: +Infinity, x: [0, 0, 0] as vec3 };
-  for (const x of [...layout.nodes, ...workIsects]) {
-    // Find a closest joint of lines
-    const d = vec3.distance(screenPoint, x);
-    if (d <= snapPoint.d) Object.assign(snapPoint, { d, x });
-  }
-  if (snapPoint.d > 16) {
-    // Find a closest point on lines if no joint near cursor.
-    for (const path of layout.paths) {
-      const t = path.getTangent();
-      const x: vec3 = vec3.subtract(vec3.create(), screenPoint, path.a);
-      const xDotT = vec3.dot(x, t);
-      if (xDotT < 0 || xDotT > path.getLength()) continue;
-      vec3.add(x, path.a, vec3.scale(t, t, xDotT));
-      const d = vec3.distance(screenPoint, x);
-      if (d <= snapPoint.d) Object.assign(snapPoint, { d, x });
+  const [focus, focusEdge] = findSnapPoint(graph, screenPoint, 16);
+  Object.assign(ghost, { focus, focusEdge });
+  if (ghost.intersections.length) ghost.intersections.splice(0);
+  if (ghost.anchor) {
+    const ghostEdge: [vec3, vec3] = [ghost.anchor, ghost.focus];
+    for (const otherEdge of getEdges(graph)) {
+      const isect = getLineLineIntersection(ghostEdge, otherEdge, true);
+      if (isect) {
+        const [t, point] = isect;
+        ghost.intersections.push({ t, point, edge: otherEdge });
+      }
     }
+    console.log("isects:", ...ghost.intersections);
+    ghost.intersections.sort((a, b) => a.t - b.t);
   }
-  cursor = snapPoint.d < 16 ? snapPoint.x : vec3.clone(screenPoint);
 
   if (isTranslating || isMiddleDown) {
     mat4.translate(camera, camera, movement);
     mat4.invert(view, camera);
-  } else if (workPath) {
-    workPath.b = cursor;
-    workPath.computePolygon();
-    workIsects.clear();
-    for (const line of layout.paths) {
-      const p = line.getIntersectionPoint(workPath);
-      if (p && p !== workPath.a && p !== workPath.b) {
-        workIsects.add(p);
-      }
-    }
   }
 });
+
+export interface RoadNode {
+  id: number;
+  vao: WebGLVertexArrayObject | null;
+  updateVAO: (vertices: Float32Array, elements: Uint32Array) => void;
+  elementCount: number;
+  adjacencyVertices: Map<vec3, { left: vec3; right: vec3 }>;
+}
+
+export interface RoadSegment {
+  vao: WebGLVertexArrayObject | null;
+  updateVAO: (vertices: Float32Array, elements: Uint32Array) => void;
+  nodes: [RoadNode, RoadNode];
+}
+
+const roadNodes = new Map<vec3, RoadNode>();
+const roadSegments: RoadSegment[] = [];
+
+function angle(a: vec3, b: vec3) {
+  const v = vec3.create();
+  vec3.subtract(v, b, a);
+  const innerAngle = vec3.angle([1, 0, 0], v);
+  if (v[1] === 0) return v[0] < 0 ? Math.PI : 0;
+  return v[1] > 0 ? 2 * Math.PI - innerAngle : innerAngle;
+}
+
+const halfWidth = 8;
+let idInc = 0;
+function updateRoadNode(a: vec3) {
+  a = node(a, graph);
+  const adjacencyList = graph.get(a);
+  if (!adjacencyList?.length) {
+    console.log("There is no node for a road node");
+    return;
+  }
+  console.log("updateRoadNode() for:", indexOf(a, graph));
+
+  let roadNode = roadNodes.get(a);
+  if (!roadNode) {
+    const [vao, updateVAO] = createVertexArray(gl);
+    roadNode = {
+      id: idInc++,
+      vao,
+      updateVAO,
+      adjacencyVertices: new Map(),
+      elementCount: 0,
+    };
+    roadNodes.set(a, roadNode);
+  }
+
+  const sorted = adjacencyList
+    .map((b) => [b, angle(a, b), indexOf(b, graph)] as const)
+    .sort((b, c) => b[1] - c[1]);
+
+  const vs = roadNode.adjacencyVertices;
+  vs.clear();
+  for (let i = 0; i < sorted.length; i++) {
+    const [adjacency] = sorted[i];
+    const aTangent = vec3.create();
+    vec3.normalize(aTangent, vec3.subtract(aTangent, adjacency, a));
+    const al = vec3.create();
+    vec3.set(al, aTangent[1], -aTangent[0], 0);
+    vec3.scaleAndAdd(al, a, al, halfWidth);
+
+    if (sorted.length === 1) {
+      const aRight = vec3.create();
+      vec3.set(aRight, -aTangent[1], aTangent[0], 0);
+      vec3.scaleAndAdd(aRight, a, aRight, halfWidth);
+      vs.set(adjacency, { left: al, right: aRight });
+    } else {
+      const [nextAdjacency] = sorted[(i + 1) % sorted.length];
+      const nr = vec3.create();
+      const nTangent = vec3.create();
+      vec3.normalize(nTangent, vec3.subtract(nTangent, nextAdjacency, a));
+      vec3.set(nr, -nTangent[1], nTangent[0], 0);
+      vec3.scaleAndAdd(nr, a, nr, halfWidth);
+      const alEnd = vec3.scaleAndAdd(aTangent, al, aTangent, halfWidth);
+      const nrEnd = vec3.scaleAndAdd(nTangent, nr, nTangent, halfWidth);
+      const isect = getLineLineIntersection([al, alEnd], [nr, nrEnd], false);
+      if (!isect) continue; // two lines are overlayed
+      let avs = vs.get(adjacency);
+      if (!avs) vs.set(adjacency, (avs = { left: null!, right: null! }));
+      avs.left = isect[1];
+      let nvs = vs.get(nextAdjacency);
+      if (!nvs) vs.set(nextAdjacency, (nvs = { left: null!, right: null! }));
+      nvs.right = isect[1];
+    }
+  }
+  const jointVerts: number[] = [...a];
+  const jointElements: number[] = [];
+  let i = 1;
+  for (const [b, thisVertices] of vs) {
+    jointVerts.push(...thisVertices.right, ...thisVertices.left);
+    jointElements.push(0, i++, i++);
+
+    if (b === a) continue;
+    const otherRoadNode = roadNodes.get(b);
+    if (!otherRoadNode) continue;
+    const otherVertices = otherRoadNode.adjacencyVertices.get(a);
+    if (!otherVertices) continue;
+    let segment = roadSegments.find(
+      (seg) =>
+        (seg.nodes[0] === roadNode && seg.nodes[1] === otherRoadNode) ||
+        (seg.nodes[0] === otherRoadNode && seg.nodes[1] === roadNode),
+    );
+    if (!segment) {
+      const [vao, updateVAO] = createVertexArray(gl);
+      segment = { vao, updateVAO, nodes: [roadNode, otherRoadNode] };
+      roadSegments.push(segment);
+      console.log("road segment added:", indexOf(a, graph), indexOf(b, graph));
+    } else {
+      console.log("road segment found:", indexOf(a, graph), indexOf(b, graph));
+    }
+
+    const verts = [
+      ...thisVertices.left,
+      ...thisVertices.right,
+      ...otherVertices.left,
+      ...otherVertices.right,
+    ];
+    const elems = [0, 1, 2, 2, 3, 0];
+    segment.updateVAO(new Float32Array(verts), new Uint32Array(elems));
+  }
+  roadNode.updateVAO(
+    new Float32Array(jointVerts),
+    new Uint32Array(jointElements),
+  );
+  roadNode.elementCount = jointElements.length;
+}
+
+function removeRoadSegment(a: vec3, b: vec3) {
+  const aRoadNode = roadNodes.get((a = node(a, graph)));
+  const bRoadNode = roadNodes.get((b = node(b, graph)));
+
+  const segmentIdx = roadSegments.findIndex(
+    (seg) =>
+      (seg.nodes[0] === aRoadNode && seg.nodes[1] === bRoadNode) ||
+      (seg.nodes[0] === bRoadNode && seg.nodes[1] === aRoadNode),
+  );
+  if (segmentIdx !== -1) roadSegments.splice(segmentIdx, 1);
+}
 
 let isTranslating = false;
 ui.canvas.addEventListener("pointerdown", (e) => {
   isMiddleDown = e.pointerType === "mouse" && e.button === 1;
-
+  const isRightDown = e.pointerType === "mouse" && e.button === 2;
   if (ui.activeTool === "none" || isMiddleDown) {
     isTranslating = true;
     e.preventDefault();
   } else if (ui.activeTool === "road") {
     e.preventDefault();
 
-    if (workPath && e.pointerType === "mouse" && e.button === 2) {
-      workPath = null;
-      workIsects.clear();
-    } else if (workPath) {
-      // find intersections and split lines.
-      const joints = new Set<vec3>();
-      const queue: RoadPath[] = [workPath];
-      queueLoop: while (queue.length) {
-        const path = queue.shift()!;
-        linesLoop: for (const other of layout.paths) {
-          let p = other.getIntersectionPoint(path);
-          if (p) {
-            for (const i of workIsects) {
-              if (vec3.equals(p, i)) {
-                p = i;
-                break;
-              }
-            }
-          }
-          if (!p) continue linesLoop;
-
-          joints.add(p);
-          const isFromLineJoint = path.a === p || path.b === p;
-          const isFromOtherJoint = other.a === p || other.b === p;
-          if (isFromLineJoint && isFromOtherJoint) continue linesLoop;
-
-          if (!isFromOtherJoint) {
-            if (layout.nodes.indexOf(p) === -1) layout.nodes.push(p);
-            layout.paths.push(new RoadPath(other.a, p, 16));
-            layout.paths.push(new RoadPath(p, other.b, 16));
-            layout.paths.splice(layout.paths.indexOf(other), 1);
-          }
-          if (isFromLineJoint) {
-            queue.push(path);
-          } else {
-            queue.push(new RoadPath(path.a, p, 16));
-            queue.push(new RoadPath(p, path.b, 16));
-          }
-          continue queueLoop;
+    if (ghost.anchor) {
+      if (!isRightDown) {
+        let a = ghost.anchor;
+        console.log("isects:", ...ghost.intersections);
+        for (const isect of ghost.intersections) {
+          addEdge(a, isect.point, graph);
+          removeEdge(isect.edge[0], isect.edge[1], graph);
+          addEdge(isect.edge[0], isect.point, graph);
+          addEdge(isect.edge[1], isect.point, graph);
+          removeRoadSegment(isect.edge[0], isect.edge[1]);
+          updateRoadNode(a);
+          updateRoadNode(isect.edge[0]);
+          updateRoadNode(isect.edge[1]);
+          updateRoadNode(isect.point);
+          a = isect.point;
         }
-        if (layout.nodes.indexOf(path.a) === -1) layout.nodes.push(path.a);
-        if (layout.nodes.indexOf(path.b) === -1) layout.nodes.push(path.b);
-        layout.paths.push(path);
+        addEdge(a, ghost.focus, graph);
+        updateRoadNode(a);
+        updateRoadNode(ghost.focus);
       }
-      workIsects.clear();
-      workPath = null;
-
-      console.log(
-        "Number of nodes:",
-        layout.nodes.length,
-        "Number of paths:",
-        layout.paths.length,
-      );
-
-      // modify path side ends to make joints fit
-      for (const joint of joints) {
-        const connected: { path: RoadPath; vector: vec3 }[] = [];
-        for (const path of layout.paths) {
-          if (path.a !== joint && path.b !== joint) continue;
-          const vector = vec3.create();
-          if (path.a === joint) vec3.subtract(vector, path.b, path.a);
-          else vec3.subtract(vector, path.a, path.b);
-          connected.push({ path, vector });
-        }
-      }
+      ghost.anchor = null;
+      console.log("Number of nodes:", graph.size);
+      printGraph(graph);
     } else {
-      workIsects.clear();
-      workPath = new RoadPath(cursor, cursor, 16);
+      ghost.anchor = ghost.focus;
+      ghost.focus = vec3.clone(ghost.focus);
     }
   }
 });
@@ -193,39 +274,50 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
 
   mat4.identity(model);
   const gray: ReadonlyVec4 = [0, 0, 0, 0.25];
-  for (const path of layout.paths) {
-    updateVAO(
-      new Float32Array(path.getPolygon().flatMap((n) => [...n])),
-      new Uint32Array([0, 1, 2, 2, 3, 0].reverse()),
-    );
-    drawFlat(view, projection, model, gray, vao, gl.TRIANGLES, 6);
+  for (const segment of roadSegments) {
+    drawFlat(view, projection, model, gray, segment.vao, gl.TRIANGLES, 6);
   }
 
-  for (const node of layout.nodes) {
-    mat4.fromTranslation(model, node);
-    drawNode(view, projection, model, gray, false);
-  }
-  const blue: ReadonlyVec4 = [0, 0.5, 1, 0.25];
-  if (workPath) {
-    mat4.identity(model);
-    updateVAO(
-      new Float32Array(workPath.getPolygon().flatMap((n) => [...n])),
-      new Uint32Array([0, 1, 2, 2, 3, 0].reverse()),
+  for (const node of roadNodes.values()) {
+    drawFlat(
+      view,
+      projection,
+      model,
+      [0, 0, 0, 0.125],
+      node.vao,
+      gl.TRIANGLES,
+      node.elementCount,
     );
-    drawFlat(view, projection, model, blue, vao, gl.TRIANGLES, 6);
-
-    mat4.fromTranslation(model, workPath.a);
-    drawNode(view, projection, model, blue, false);
-    mat4.fromTranslation(model, workPath.b);
-    drawNode(view, projection, model, blue, false);
-    for (const p of workIsects) {
-      mat4.fromTranslation(model, p);
-      drawNode(view, projection, model, blue, false);
-    }
-  } else {
-    mat4.fromTranslation(model, cursor);
-    drawNode(view, projection, model, blue, false);
   }
+
+  mat4.identity(model);
+  for (const e of getEdges(graph)) {
+    updateVAO(
+      new Float32Array(e.flatMap((n) => [...n])),
+      new Uint32Array([0, 1]),
+    );
+    drawFlat(view, projection, model, gray, vao, gl.LINES, 2);
+  }
+
+  for (const n of graph.keys()) {
+    mat4.fromTranslation(model, n);
+    drawNode(view, projection, model, [0, 0, 0, 1], 2, false);
+  }
+
+  mat4.identity(model);
+  const blue: ReadonlyVec4 = [0, 0.5, 1, 1];
+  if (ghost.anchor) {
+    updateVAO(
+      new Float32Array([...ghost.anchor, ...ghost.focus]),
+      new Uint32Array([0, 1]),
+    );
+    drawFlat(view, projection, model, blue, vao, gl.LINES, 2);
+    mat4.fromTranslation(model, ghost.anchor);
+    drawNode(view, projection, model, blue, 2, false);
+  }
+
+  mat4.fromTranslation(model, ghost.focus);
+  drawNode(view, projection, model, blue, 2, false);
 
   requestAnimationFrame(frame.bind(null, time));
 });
