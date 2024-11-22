@@ -1,4 +1,4 @@
-import { mat4, ReadonlyVec4, vec3 } from "gl-matrix";
+import { mat4, ReadonlyVec3, ReadonlyVec4, vec3 } from "gl-matrix";
 import { setPointerPoint } from "./canvas";
 import {
   createFlatShader,
@@ -16,8 +16,8 @@ import {
   printGraph,
   removeEdge,
 } from "./graph";
-import { initUI } from "./ui";
 import { getLineLineIntersection } from "./primitive";
+import { initUI } from "./ui";
 
 // # setup canvas
 const ui = initUI();
@@ -73,11 +73,10 @@ ui.canvas.addEventListener("pointermove", (e) => {
 });
 
 export interface RoadNode {
-  id: number;
   vao: WebGLVertexArrayObject | null;
   updateVAO: (vertices: Float32Array, elements: Uint32Array) => void;
   elementCount: number;
-  adjacencyVertices: Map<vec3, { left: vec3; right: vec3 }>;
+  adjacentVertices: Map<vec3, { left: vec3; right: vec3 }>;
 }
 
 export interface RoadSegment {
@@ -97,8 +96,28 @@ function angle(a: vec3, b: vec3) {
   return v[1] > 0 ? 2 * Math.PI - innerAngle : innerAngle;
 }
 
-const halfWidth = 8;
-let idInc = 0;
+function getSide(
+  out: vec3,
+  center: ReadonlyVec3,
+  tangent: ReadonlyVec3,
+  which: "LEFT" | "RIGHT",
+  width: number,
+) {
+  if (which === "LEFT") vec3.set(out, tangent[1], -tangent[0], 0);
+  else vec3.set(out, -tangent[1], tangent[0], 0);
+  return vec3.scaleAndAdd(out, center, out, width / 2);
+}
+
+function getTangent(out: vec3, a: ReadonlyVec3, b: ReadonlyVec3) {
+  return vec3.normalize(out, vec3.subtract(out, b, a));
+}
+
+function createLine(a: vec3, tangent: ReadonlyVec3, length: number) {
+  return [a, vec3.scaleAndAdd(vec3.create(), a, tangent, length)] as const;
+}
+
+const width = 16;
+
 function updateRoadNode(a: vec3) {
   a = node(a, graph);
   const adjacencyList = graph.get(a);
@@ -107,13 +126,7 @@ function updateRoadNode(a: vec3) {
   let roadNode = roadNodes.get(a);
   if (!roadNode) {
     const [vao, updateVAO] = createVertexArray(gl);
-    roadNode = {
-      id: idInc++,
-      vao,
-      updateVAO,
-      adjacencyVertices: new Map(),
-      elementCount: 0,
-    };
+    roadNode = { vao, updateVAO, adjacentVertices: new Map(), elementCount: 0 };
     roadNodes.set(a, roadNode);
   }
 
@@ -121,52 +134,48 @@ function updateRoadNode(a: vec3) {
     .map((b) => [b, angle(a, b), indexOf(b, graph)] as const)
     .sort((b, c) => b[1] - c[1]);
 
-  const vs = roadNode.adjacencyVertices;
+  const vs = roadNode.adjacentVertices;
   vs.clear();
+
   for (let i = 0; i < sorted.length; i++) {
-    const [adjacency] = sorted[i];
-    const aTangent = vec3.create();
-    vec3.normalize(aTangent, vec3.subtract(aTangent, adjacency, a));
-    const al = vec3.create();
-    vec3.set(al, aTangent[1], -aTangent[0], 0);
-    vec3.scaleAndAdd(al, a, al, halfWidth);
+    const [current] = sorted[i];
+    const tangent = getTangent(vec3.create(), current, a);
+    const left = getSide(vec3.create(), a, tangent, "LEFT", width);
 
     if (sorted.length === 1) {
-      const aRight = vec3.create();
-      vec3.set(aRight, -aTangent[1], aTangent[0], 0);
-      vec3.scaleAndAdd(aRight, a, aRight, halfWidth);
-      vs.set(adjacency, { left: al, right: aRight });
+      const right = getSide(vec3.create(), a, tangent, "RIGHT", width);
+      vs.set(current, { left, right });
     } else {
-      const [nextAdjacency] = sorted[(i + 1) % sorted.length];
-      const nr = vec3.create();
-      const nTangent = vec3.create();
-      vec3.normalize(nTangent, vec3.subtract(nTangent, nextAdjacency, a));
-      vec3.set(nr, -nTangent[1], nTangent[0], 0);
-      vec3.scaleAndAdd(nr, a, nr, halfWidth);
-      const alEnd = vec3.scaleAndAdd(aTangent, al, aTangent, halfWidth);
-      const nrEnd = vec3.scaleAndAdd(nTangent, nr, nTangent, halfWidth);
-      const isect = getLineLineIntersection([al, alEnd], [nr, nrEnd], false);
+      const [next] = sorted[(i + 1) % sorted.length];
+      const nextTangent = getTangent(vec3.create(), next, a);
+      const nextRight = getSide(vec3.create(), a, nextTangent, "RIGHT", width);
+
+      const leftLine = createLine(left, tangent, width / 2);
+      const nextRightLine = createLine(nextRight, nextTangent, width / 2);
+      const isect = getLineLineIntersection(leftLine, nextRightLine, false);
       if (!isect) continue; // two lines are overlayed
-      let avs = vs.get(adjacency);
-      if (!avs) vs.set(adjacency, (avs = { left: null!, right: null! }));
+
+      let avs = vs.get(current);
+      if (!avs) vs.set(current, (avs = { left: null!, right: null! }));
       avs.left = isect[1];
-      let nvs = vs.get(nextAdjacency);
-      if (!nvs) vs.set(nextAdjacency, (nvs = { left: null!, right: null! }));
+      let nvs = vs.get(next);
+      if (!nvs) vs.set(next, (nvs = { left: null!, right: null! }));
       nvs.right = isect[1];
     }
   }
+
   const jointVerts: number[] = [...a];
   const jointElements: number[] = [];
   let i = 1;
-  for (const [b, thisVertices] of vs) {
-    jointVerts.push(...thisVertices.right, ...thisVertices.left);
+  for (const [b, tvs] of vs) {
+    jointVerts.push(...tvs.right, ...tvs.left);
     jointElements.push(0, i++, i++);
 
     if (b === a) continue;
     const otherRoadNode = roadNodes.get(b);
     if (!otherRoadNode) continue;
-    const otherVertices = otherRoadNode.adjacencyVertices.get(a);
-    if (!otherVertices) continue;
+    const ovs = otherRoadNode.adjacentVertices.get(a);
+    if (!ovs) continue;
     let segment = roadSegments.find(
       (seg) =>
         (seg.nodes[0] === roadNode && seg.nodes[1] === otherRoadNode) ||
@@ -178,12 +187,7 @@ function updateRoadNode(a: vec3) {
       roadSegments.push(segment);
     }
 
-    const verts = [
-      ...thisVertices.left,
-      ...thisVertices.right,
-      ...otherVertices.left,
-      ...otherVertices.right,
-    ];
+    const verts = [...tvs.left, ...tvs.right, ...ovs.left, ...ovs.right];
     const elems = [0, 1, 2, 2, 3, 0];
     segment.updateVAO(new Float32Array(verts), new Uint32Array(elems));
   }
