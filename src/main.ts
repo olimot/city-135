@@ -40,6 +40,7 @@ const [vao, updateVAO] = createVertexArray(gl);
 const graph = createGraph();
 const ghost = {
   anchor: null as vec3 | null,
+  control: null as vec3 | null,
   focus: vec3.create(),
   focusEdge: null as [vec3, vec3] | null,
   intersections: [] as { t: number; point: vec3; edge: [vec3, vec3] }[],
@@ -51,7 +52,8 @@ const movement = vec3.create();
 ui.canvas.addEventListener("pointermove", (e) => {
   setPointerPoint(screenPoint, movement, projection, view, e);
 
-  const [focus, focusEdge] = findSnapPoint(graph, screenPoint, 16);
+  const focus = vec3.create();
+  const focusEdge = findSnapPoint(focus, graph, screenPoint, 8);
   Object.assign(ghost, { focus, focusEdge });
   if (ghost.intersections.length) ghost.intersections.splice(0);
   if (ghost.anchor) {
@@ -121,6 +123,11 @@ const width = 16;
 function applyT(x: vec3, line: readonly [vec3, vec3], t: number) {
   vec3.add(x, line[0], vec3.scale(x, vec3.sub(x, line[1], line[0]), t));
   return x;
+}
+
+function isSegmentOf(a: RoadNode | undefined, b: RoadNode | undefined) {
+  return ({ nodes: [x, y] }: RoadSegment) =>
+    (x === a && y === b) || (x === b && y === a);
 }
 
 function updateRoadNode(a: vec3) {
@@ -202,11 +209,7 @@ function updateRoadNode(a: vec3) {
     if (!otherRoadNode) continue;
     const ovs = otherRoadNode.segmentVertexMap.get(a);
     if (!ovs) continue;
-    let segment = roadSegments.find(
-      (seg) =>
-        (seg.nodes[0] === roadNode && seg.nodes[1] === otherRoadNode) ||
-        (seg.nodes[0] === otherRoadNode && seg.nodes[1] === roadNode),
-    );
+    let segment = roadSegments.find(isSegmentOf(roadNode, otherRoadNode));
     if (!segment) {
       const [vao, updateVAO] = createVertexArray(gl);
       segment = { vao, updateVAO, nodes: [roadNode, otherRoadNode] };
@@ -222,12 +225,7 @@ function updateRoadNode(a: vec3) {
 function removeRoadSegment(a: vec3, b: vec3) {
   const aRoadNode = roadNodes.get((a = node(a, graph)));
   const bRoadNode = roadNodes.get((b = node(b, graph)));
-
-  const segmentIdx = roadSegments.findIndex(
-    (seg) =>
-      (seg.nodes[0] === aRoadNode && seg.nodes[1] === bRoadNode) ||
-      (seg.nodes[0] === bRoadNode && seg.nodes[1] === aRoadNode),
-  );
+  const segmentIdx = roadSegments.findIndex(isSegmentOf(aRoadNode, bRoadNode));
   if (segmentIdx !== -1) roadSegments.splice(segmentIdx, 1);
 }
 
@@ -240,20 +238,19 @@ ui.canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
   } else if (ui.activeTool === "road") {
     e.preventDefault();
-
     if (ghost.anchor) {
       if (!isRightDown) {
         let a = ghost.anchor;
         for (const isect of ghost.intersections) {
-          addEdge(a, isect.point, graph);
           removeEdge(isect.edge[0], isect.edge[1], graph);
+          removeRoadSegment(isect.edge[0], isect.edge[1]);
+          addEdge(a, isect.point, graph);
           addEdge(isect.edge[0], isect.point, graph);
           addEdge(isect.edge[1], isect.point, graph);
-          removeRoadSegment(isect.edge[0], isect.edge[1]);
           updateRoadNode(a);
+          updateRoadNode(isect.point);
           updateRoadNode(isect.edge[0]);
           updateRoadNode(isect.edge[1]);
-          updateRoadNode(isect.point);
           a = isect.point;
         }
         addEdge(a, ghost.focus, graph);
@@ -266,6 +263,37 @@ ui.canvas.addEventListener("pointerdown", (e) => {
     } else {
       ghost.anchor = ghost.focus;
       ghost.focus = vec3.clone(ghost.focus);
+    }
+  } else if (ui.activeTool === "bezier") {
+    e.preventDefault();
+    if (!ghost.anchor) {
+      ghost.anchor = ghost.focus;
+    } else if (!ghost.control) {
+      ghost.control = ghost.focus;
+      ghost.focus = vec3.clone(ghost.focus);
+    } else {
+      if (!isRightDown) {
+        let a = ghost.anchor;
+        for (const isect of ghost.intersections) {
+          removeEdge(isect.edge[0], isect.edge[1], graph);
+          removeRoadSegment(isect.edge[0], isect.edge[1]);
+          addEdge(a, isect.point, graph);
+          addEdge(isect.edge[0], isect.point, graph);
+          addEdge(isect.edge[1], isect.point, graph);
+          updateRoadNode(a);
+          updateRoadNode(isect.point);
+          updateRoadNode(isect.edge[0]);
+          updateRoadNode(isect.edge[1]);
+          a = isect.point;
+        }
+        addEdge(a, ghost.focus, graph);
+        updateRoadNode(a);
+        updateRoadNode(ghost.focus);
+      }
+      ghost.anchor = null;
+      ghost.control = null;
+      console.log("Number of nodes:", graph.size);
+      printGraph(graph);
     }
   }
 });
@@ -323,7 +351,15 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
 
   mat4.identity(model);
   const blue: ReadonlyVec4 = [0, 0.5, 1, 1];
-  if (ghost.anchor) {
+  if (ghost.anchor && ghost.control) {
+    updateVAO(
+      new Float32Array([...ghost.anchor, ...ghost.control, ...ghost.focus]),
+      new Uint32Array([0, 1, 1, 2]),
+    );
+    drawFlat(view, projection, model, blue, vao, gl.LINES, 4);
+    mat4.fromTranslation(model, ghost.anchor);
+    drawNode(view, projection, model, blue, 2, false);
+  } else if (ghost.anchor) {
     updateVAO(
       new Float32Array([...ghost.anchor, ...ghost.focus]),
       new Uint32Array([0, 1]),

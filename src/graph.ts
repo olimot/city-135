@@ -87,17 +87,21 @@ export function* getEdges(graph: Graph) {
 }
 
 export function findSnapPoint(
+  out: vec3,
   graph: Graph,
-  screenPoint: vec3,
-  radius: number,
-): [vec3, [vec3, vec3] | null] {
+  p: vec3,
+  r: number,
+): [vec3, vec3] | null {
   for (const node of graph.keys()) {
-    if (vec3.distance(screenPoint, node) <= radius) return [node, null];
+    if (vec3.distance(p, vec3.copy(out, node)) <= r) {
+      return null;
+    }
   }
   for (const edge of getEdges(graph)) {
-    const node = getClosestPointOnLine(edge, screenPoint);
-    const distance = vec3.distance(screenPoint, node);
-    if (distance <= radius) return [node, edge];
+    const node = getClosestPointOnLine(out, edge, p);
+    const distance = vec3.distance(p, node);
+    if (distance <= r) return edge;
   }
-  return [vec3.clone(screenPoint), null];
+  vec3.copy(out, p);
+  return null;
 }
