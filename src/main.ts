@@ -59,7 +59,7 @@ ui.canvas.addEventListener("pointermove", (e) => {
     for (const otherEdge of getEdges(graph)) {
       const isect = getLineLineIntersection(ghostEdge, otherEdge, true);
       if (isect) {
-        const [t, point] = isect;
+        const [point, t] = isect;
         ghost.intersections.push({ t, point, edge: otherEdge });
       }
     }
@@ -76,7 +76,7 @@ export interface RoadNode {
   vao: WebGLVertexArrayObject | null;
   updateVAO: (vertices: Float32Array, elements: Uint32Array) => void;
   elementCount: number;
-  adjacentVertices: Map<vec3, { left: vec3; right: vec3 }>;
+  segmentVertexMap: Map<vec3, { left: vec3; right: vec3 }>;
 }
 
 export interface RoadSegment {
@@ -103,8 +103,8 @@ function getSide(
   which: "LEFT" | "RIGHT",
   width: number,
 ) {
-  if (which === "LEFT") vec3.set(out, tangent[1], -tangent[0], 0);
-  else vec3.set(out, -tangent[1], tangent[0], 0);
+  if (which === "LEFT") vec3.set(out, -tangent[1], tangent[0], 0);
+  else vec3.set(out, tangent[1], -tangent[0], 0);
   return vec3.scaleAndAdd(out, center, out, width / 2);
 }
 
@@ -112,11 +112,16 @@ function getTangent(out: vec3, a: ReadonlyVec3, b: ReadonlyVec3) {
   return vec3.normalize(out, vec3.subtract(out, b, a));
 }
 
-function createLine(a: vec3, tangent: ReadonlyVec3, length: number) {
-  return [a, vec3.scaleAndAdd(vec3.create(), a, tangent, length)] as const;
+function createLineFromVector(a: vec3, vector: ReadonlyVec3, length: number) {
+  return [a, vec3.scaleAndAdd(vec3.create(), a, vector, length)] as const;
 }
 
 const width = 16;
+
+function applyT(x: vec3, line: readonly [vec3, vec3], t: number) {
+  vec3.add(x, line[0], vec3.scale(x, vec3.sub(x, line[1], line[0]), t));
+  return x;
+}
 
 function updateRoadNode(a: vec3) {
   a = node(a, graph);
@@ -126,7 +131,7 @@ function updateRoadNode(a: vec3) {
   let roadNode = roadNodes.get(a);
   if (!roadNode) {
     const [vao, updateVAO] = createVertexArray(gl);
-    roadNode = { vao, updateVAO, adjacentVertices: new Map(), elementCount: 0 };
+    roadNode = { vao, updateVAO, segmentVertexMap: new Map(), elementCount: 0 };
     roadNodes.set(a, roadNode);
   }
 
@@ -134,47 +139,68 @@ function updateRoadNode(a: vec3) {
     .map((b) => [b, angle(a, b), indexOf(b, graph)] as const)
     .sort((b, c) => b[1] - c[1]);
 
-  const vs = roadNode.adjacentVertices;
-  vs.clear();
+  const segVertMap = roadNode.segmentVertexMap;
+  segVertMap.clear();
+
+  const nodeVertices: number[] = [];
 
   for (let i = 0; i < sorted.length; i++) {
     const [current] = sorted[i];
-    const tangent = getTangent(vec3.create(), current, a);
-    const left = getSide(vec3.create(), a, tangent, "LEFT", width);
+    const tan = getTangent(vec3.create(), current, a);
+    const left = getSide(vec3.create(), a, tan, "LEFT", width);
 
     if (sorted.length === 1) {
-      const right = getSide(vec3.create(), a, tangent, "RIGHT", width);
-      vs.set(current, { left, right });
+      const right = getSide(vec3.create(), a, tan, "RIGHT", width);
+      segVertMap.set(current, { left, right });
+
+      const vLeft = vec3.scaleAndAdd(vec3.create(), left, tan, width / 2);
+      const vRight = vec3.scaleAndAdd(vec3.create(), right, tan, width / 2);
+      nodeVertices.push(...left, ...vLeft, ...vRight, ...right);
     } else {
       const [next] = sorted[(i + 1) % sorted.length];
-      const nextTangent = getTangent(vec3.create(), next, a);
-      const nextRight = getSide(vec3.create(), a, nextTangent, "RIGHT", width);
+      const nextTan = getTangent(vec3.create(), next, a);
+      const nextRight = getSide(vec3.create(), a, nextTan, "RIGHT", width);
 
-      const leftLine = createLine(left, tangent, width / 2);
-      const nextRightLine = createLine(nextRight, nextTangent, width / 2);
-      const isect = getLineLineIntersection(leftLine, nextRightLine, false);
-      if (!isect) continue; // two lines are overlayed
-
-      let avs = vs.get(current);
-      if (!avs) vs.set(current, (avs = { left: null!, right: null! }));
-      avs.left = isect[1];
-      let nvs = vs.get(next);
-      if (!nvs) vs.set(next, (nvs = { left: null!, right: null! }));
-      nvs.right = isect[1];
+      const leftLine = createLineFromVector(left, tan, width / 2);
+      const nextRightLine = createLineFromVector(nextRight, nextTan, width / 2);
+      const iresult = getLineLineIntersection(leftLine, nextRightLine, false);
+      if (!iresult) continue; // two lines are overlayed
+      const [isect, t, u] = iresult;
+      let avs = segVertMap.get(current);
+      if (!avs) segVertMap.set(current, (avs = { left: null!, right: null! }));
+      let nvs = segVertMap.get(next);
+      if (!nvs) segVertMap.set(next, (nvs = { left: null!, right: null! }));
+      if (t < 0 && u < 0) {
+        nvs.right = avs.left = isect;
+        nodeVertices.push(...isect);
+      } else {
+        avs.left = left;
+        nvs.right = nextRight;
+        const vLeft = applyT(vec3.create(), leftLine, Math.min(t, 1));
+        const vRight = applyT(vec3.create(), nextRightLine, Math.min(u, 1));
+        nodeVertices.push(...left, ...vLeft, ...vRight, ...nextRight);
+      }
     }
   }
 
-  const jointVerts: number[] = [...a];
-  const jointElements: number[] = [];
-  let i = 1;
-  for (const [b, tvs] of vs) {
-    jointVerts.push(...tvs.right, ...tvs.left);
-    jointElements.push(0, i++, i++);
+  const vertCount = nodeVertices.length / 3;
+  const jointElements = Array.from(Array(vertCount)).flatMap((_, i) => {
+    return i === vertCount - 1 ? [0, i + 1, 1] : [0, i + 1, i + 2];
+  });
+  roadNode.updateVAO(
+    new Float32Array([...a, ...nodeVertices]),
+    new Uint32Array(jointElements),
+  );
+  roadNode.elementCount = jointElements.length;
+
+  const segVertEntries = [...segVertMap];
+  for (let i = 0; i < segVertEntries.length; i++) {
+    const [b, tvs] = segVertEntries[i];
 
     if (b === a) continue;
     const otherRoadNode = roadNodes.get(b);
     if (!otherRoadNode) continue;
-    const ovs = otherRoadNode.adjacentVertices.get(a);
+    const ovs = otherRoadNode.segmentVertexMap.get(a);
     if (!ovs) continue;
     let segment = roadSegments.find(
       (seg) =>
@@ -191,11 +217,6 @@ function updateRoadNode(a: vec3) {
     const elems = [0, 1, 2, 2, 3, 0];
     segment.updateVAO(new Float32Array(verts), new Uint32Array(elems));
   }
-  roadNode.updateVAO(
-    new Float32Array(jointVerts),
-    new Uint32Array(jointElements),
-  );
-  roadNode.elementCount = jointElements.length;
 }
 
 function removeRoadSegment(a: vec3, b: vec3) {
@@ -273,12 +294,13 @@ requestAnimationFrame(function frame(prev: number, time = prev) {
     drawFlat(view, projection, model, gray, segment.vao, gl.TRIANGLES, 6);
   }
 
+  const red: ReadonlyVec4 = [1, 0, 0, 0.25];
   for (const node of roadNodes.values()) {
     drawFlat(
       view,
       projection,
       model,
-      [0, 0, 0, 0.125],
+      red,
       node.vao,
       gl.TRIANGLES,
       node.elementCount,

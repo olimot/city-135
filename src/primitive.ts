@@ -16,41 +16,25 @@ const s = vec3.create();
 export function getLineLineIntersection(
   a: readonly [vec3, vec3],
   b: readonly [vec3, vec3],
-  strict?: true,
-): [number, vec3] | null;
-export function getLineLineIntersection(
-  a: readonly [vec3, vec3],
-  b: readonly [vec3, vec3],
-  strict: false,
-): [number, vec3];
-export function getLineLineIntersection(
-  a: readonly [vec3, vec3],
-  b: readonly [vec3, vec3],
   strict = true,
-): [number, vec3] | null {
+): [vec3, number, number] | null {
   const [p, pEnd] = a;
   const [q, qEnd] = b;
   vec3.sub(r, pEnd, p);
   vec3.sub(s, qEnd, q);
 
   const rlen = vec3.length(r);
-  if (rlen < tolerance) {
-    console.log("line r is not long enough");
-    return null;
-  }
+  if (rlen < tolerance) return null;
 
   const slen = vec3.length(s);
-  if (slen < tolerance) {
-    console.log("line s is not long enough");
-    return null;
-  }
+  if (slen < tolerance) return null;
 
   const denominator = vec3.cross(x, r, s)[2];
   if (!denominator) {
-    if (vec3.distance(p, q) < tolerance || vec3.distance(p, qEnd) < tolerance) {
-      return [0, p];
-    }
-    if (vec3.distance(q, pEnd) < tolerance) return [1, q];
+    if (vec3.distance(p, q) < tolerance) return [p, 0, 0];
+    if (vec3.distance(p, qEnd) < tolerance) return [p, 0, 1];
+    if (vec3.distance(pEnd, q) < tolerance) return [pEnd, 1, 0];
+    if (vec3.distance(pEnd, qEnd) < tolerance) return [pEnd, 1, 1];
     console.warn(`parallel and overlay:
 ${toStringFromVec3(a[0])} - ${toStringFromVec3(a[1])}
 ${toStringFromVec3(b[0])} - ${toStringFromVec3(b[1])}`);
@@ -66,12 +50,12 @@ ${toStringFromVec3(b[0])} - ${toStringFromVec3(b[1])}`);
     return null;
   }
   vec3.add(x, p, vec3.scale(x, r, t));
-  if (vec3.distance(x, p) < tolerance) return [t, p];
-  if (vec3.distance(x, pEnd) < tolerance) return [t, pEnd];
-  if (vec3.distance(x, q) < tolerance) return [t, q];
-  if (vec3.distance(x, qEnd) < tolerance) return [t, qEnd];
+  if (vec3.distance(x, p) < tolerance) return [p, 0, u];
+  if (vec3.distance(x, pEnd) < tolerance) return [pEnd, 1, u];
+  if (vec3.distance(x, q) < tolerance) return [q, t, 0];
+  if (vec3.distance(x, qEnd) < tolerance) return [qEnd, t, 1];
 
-  return [t, vec3.clone(x)];
+  return [vec3.clone(x), t, u];
 }
 
 const t = vec3.create();
